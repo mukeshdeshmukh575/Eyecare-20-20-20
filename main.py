@@ -5,6 +5,7 @@ import random
 import datetime
 import winreg
 import winsound
+import ctypes
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
@@ -843,12 +844,72 @@ class EyecareApp:
         self.tray_icon.setToolTip(f"Eyecare - {time_str} until eye break")
 
     def timer_tick(self):
+        # Pause the timer if screen is locked
+        if self._is_screen_locked():
+            return
+
         if self.seconds_remaining > 0:
             self.seconds_remaining -= 1
-            # Update tooltip every second, but avoid heavy operations
             self.update_tooltip()
         else:
-            self.trigger_break()
+            # Postpone break if in a meeting
+            if self._is_in_meeting():
+                self.seconds_remaining = 300  # Postpone by 5 minutes
+                self.tray_icon.setToolTip("Eyecare - Postponed (Meeting Active)")
+                self.status_action.setText("Break postponed (meeting active)")
+            else:
+                self.trigger_break()
+
+    def _is_screen_locked(self):
+        try:
+            h_desktop = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
+            if h_desktop:
+                ctypes.windll.user32.CloseDesktop(h_desktop)
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _is_in_meeting(self):
+        meeting_keywords = [
+            "zoom meeting", "zoom webinar", 
+            "microsoft teams meeting", "meeting in | microsoft teams", "meeting | microsoft teams",
+            "- google meet", "meet - ",
+            "webex meeting", "cisco webex"
+        ]
+        try:
+            titles = self._get_window_titles()
+            for title in titles:
+                title_lower = title.lower()
+                for kw in meeting_keywords:
+                    if kw in title_lower:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _get_window_titles(self):
+        titles = []
+        try:
+            EnumWindows = ctypes.windll.user32.EnumWindows
+            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            GetWindowText = ctypes.windll.user32.GetWindowTextW
+            GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
+            IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+
+            def foreach_window(hwnd, lParam):
+                if IsWindowVisible(hwnd):
+                    length = GetWindowTextLength(hwnd)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        GetWindowText(hwnd, buff, length + 1)
+                        titles.append(buff.value)
+                return True
+
+            EnumWindows(EnumWindowsProc(foreach_window), 0)
+        except Exception:
+            pass
+        return titles
 
     def trigger_break(self):
         self.timer.stop()
