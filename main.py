@@ -85,29 +85,84 @@ class SettingsManager:
             self.settings.setValue("breaks_completed", 0)
             self.settings.setValue("last_date", datetime.date.today().isoformat())
 
+    def get_startup_cmd(self):
+        if getattr(sys, 'frozen', False):
+            # The application is frozen (packaged by PyInstaller etc.)
+            return f'"{sys.executable}"'
+        else:
+            # The application is running in a normal Python interpreter
+            script_path = os.path.abspath(sys.argv[0])
+            pythonw_exe = sys.executable.replace("python.exe", "pythonw.exe")
+            return f'"{pythonw_exe}" "{script_path}"'
+
+    def is_matching_cmd(self, cmd_val):
+        val_lower = str(cmd_val).lower()
+        if "eyecare.exe" in val_lower or "main.py" in val_lower:
+            return True
+        current_name = os.path.basename(sys.argv[0]).lower()
+        if current_name not in ("python.exe", "pythonw.exe", "python") and current_name in val_lower:
+            return True
+        return False
+
     def is_startup_enabled(self):
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
         key_name = "EyecareReminder"
+        expected_cmd = self.get_startup_cmd()
+        
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
-            winreg.QueryValueEx(key, key_name)
+            
+            # Check if primary key is correct
+            try:
+                val, _ = winreg.QueryValueEx(key, key_name)
+                primary_correct = (val == expected_cmd)
+            except FileNotFoundError:
+                primary_correct = False
+                
+            # Check if there are duplicate or old startup keys for Eyecare
+            has_duplicates = False
+            i = 0
+            while True:
+                try:
+                    name, val, _ = winreg.EnumValue(key, i)
+                    if name != key_name and self.is_matching_cmd(val):
+                        has_duplicates = True
+                        break
+                    i += 1
+                except OSError:
+                    break
+            
             winreg.CloseKey(key)
-            return True
-        except FileNotFoundError:
-            return False
+            return primary_correct and not has_duplicates
         except Exception:
             return False
 
     def set_startup(self, enabled):
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
         key_name = "EyecareReminder"
-        script_path = os.path.abspath(sys.argv[0])
-        # Use pythonw.exe to run without terminal window popping up
-        pythonw_exe = sys.executable.replace("python.exe", "pythonw.exe")
-        cmd = f'"{pythonw_exe}" "{script_path}"'
+        cmd = self.get_startup_cmd()
         
         try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+            
+            # Enumerate and clean up duplicate/legacy keys
+            i = 0
+            to_delete = []
+            while True:
+                try:
+                    name, val, _ = winreg.EnumValue(key, i)
+                    if name != key_name and self.is_matching_cmd(val):
+                        to_delete.append(name)
+                    i += 1
+                except OSError:
+                    break
+            
+            for name in to_delete:
+                try:
+                    winreg.DeleteValue(key, name)
+                except Exception:
+                    pass
+            
             if enabled:
                 winreg.SetValueEx(key, key_name, 0, winreg.REG_SZ, cmd)
             else:
@@ -115,6 +170,7 @@ class SettingsManager:
                     winreg.DeleteValue(key, key_name)
                 except FileNotFoundError:
                     pass
+                    
             winreg.CloseKey(key)
             return True
         except Exception as e:
@@ -712,6 +768,10 @@ class EyecareApp:
     """Core application coordinator managing timers, system tray, and notifications."""
     def __init__(self):
         self.settings = SettingsManager()
+
+        # Check and add to Windows startup if not present or incorrect path
+        if not self.settings.is_startup_enabled():
+            self.settings.set_startup(True)
 
         # Timer states
         self.is_monitoring = True
